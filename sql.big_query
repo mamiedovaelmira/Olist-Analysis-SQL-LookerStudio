@@ -1,0 +1,101 @@
+WITH delivered_orders AS (
+  SELECT 
+    o.order_id, 
+    DATE(TIMESTAMP_TRUNC(o.order_purchase_timestamp, MONTH)) AS month,
+    c.customer_state AS state,
+    CASE
+      WHEN o.order_delivered_customer_date > o.order_estimated_delivery_date THEN 1 
+      ELSE 0 
+    END AS is_late
+  FROM `brazilian_commerce.orders` AS o
+  INNER JOIN `brazilian_commerce.customers` AS c
+  USING(customer_id)
+  WHERE o.order_status = 'delivered'
+    AND o.order_purchase_timestamp >= TIMESTAMP('2017-01-01')
+),
+
+review_per_order AS (
+  SELECT 
+    order_id, 
+    AVG(review_score) AS avg_review_score
+  FROM `brazilian_commerce.order_reviews` 
+  GROUP BY order_id
+),
+
+items_with_category AS (
+  SELECT
+    i.order_id,
+    COALESCE(
+      t.string_field_1,
+        CASE p.product_category_name
+          WHEN 'pc_gamer' THEN 'pc_gamer'
+          WHEN 'portateis_cozinha_e_preparadores_de_alimentos' THEN 'portable_kitchen_food_preparers'
+        END,
+      'unknown') AS category,
+    i.price,
+    i.freight_value
+  FROM `brazilian_commerce.order_items` AS i
+  INNER JOIN `brazilian_commerce.products` AS p
+    USING(product_id)
+  LEFT JOIN `brazilian_commerce.category_name_translation` AS t
+    ON p.product_category_name = t.string_field_0
+),
+
+order_category_revenue AS (
+  SELECT 
+    order_id,
+    category,
+    SUM(price) AS revenue,
+    SUM(freight_value) AS freight,
+    COUNT(*) AS items_cnt
+  FROM items_with_category
+  GROUP BY order_id, category
+),
+
+month_category_state AS (
+  SELECT
+    del.month,
+    ocr.category,
+    del.state,
+    COUNT(DISTINCT del.order_id) AS orders_cnt,
+    SUM(ocr.items_cnt) AS items_cnt,
+    SUM(ocr.revenue) AS revenue,
+    SUM(ocr.freight) AS freight,
+    COUNT(CASE WHEN del.is_late = 1 THEN 1 END) AS late_orders_cnt,
+    SUM(rpo.avg_review_score) AS review_sum,
+    COUNT(rpo.avg_review_score) AS review_cnt
+  FROM delivered_orders AS del
+  INNER JOIN order_category_revenue AS ocr
+    USING(order_id)
+  LEFT JOIN review_per_order AS rpo
+    USING(order_id)
+  GROUP BY del.month, ocr.category, del.state
+),
+
+category_totals AS (
+  SELECT *,
+    SUM(revenue) OVER (PARTITION BY category) AS total_category_revenue
+  FROM month_category_state
+),
+
+category_ranked AS (
+  SELECT *,
+    DENSE_RANK() OVER (ORDER BY total_category_revenue DESC) AS rank_category_revenue
+  FROM category_totals
+)
+
+SELECT
+  month,
+  category,
+  state,
+  orders_cnt,
+  items_cnt,
+  ROUND(revenue, 2) AS revenue,
+  ROUND(freight, 2) AS freight,
+  late_orders_cnt,
+  ROUND(review_sum, 2) AS review_sum,
+  review_cnt,
+  ROUND(total_category_revenue, 2) AS total_category_revenue,
+  rank_category_revenue
+FROM category_ranked
+ORDER BY rank_category_revenue, month, state
